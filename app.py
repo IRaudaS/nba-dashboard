@@ -1,151 +1,138 @@
 import streamlit as st
 import pandas as pd
 from nba_api.live.nba.endpoints import scoreboard
-from nba_api.stats.static import players
-from nba_api.stats.endpoints import playercareerstats
+from nba_api.stats.endpoints import leaguegamefinder, boxscoretraditionalv2
+from nba_api.stats.static import players, teams
 
 # --- CONFIGURACIÓN VISUAL ---
 st.set_page_config(page_title="Nacho's NBA Hub", layout="wide", page_icon="🏀")
 
-# CSS para centrar imágenes y mejorar métricas
+# CSS: Ajustes para que las tablas se vean compactas y bonitas
 st.markdown("""
 <style>
     .stMetric { text-align: center; }
     div[data-testid="stImage"] { display: block; margin-left: auto; margin-right: auto; }
-    .vs-text { font-size: 30px; font-weight: bold; text-align: center; padding-top: 25px; }
+    .vs-text { font-size: 24px; font-weight: bold; text-align: center; padding-top: 20px; }
+    .team-header { text-align: center; font-size: 20px; font-weight: bold; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏀 Centro de Mando: Celtics vs Warriors")
 
-# Botón de actualización manual (La forma segura de ver datos en vivo)
-if st.button("🔄 Actualizar Datos en Vivo"):
+if st.button("🔄 Actualizar Estadísticas"):
     st.rerun()
 
+# IDs de Equipos
+CELTICS_ID = 1610612738
+WARRIORS_ID = 1610612744
+
+# --- FUNCIONES DE INTELIGENCIA DE DATOS ---
+
+@st.cache_data(ttl=600) # Guardamos en caché por 10 mins para no saturar
+def get_latest_game_stats(team_id):
+    """
+    Busca el último juego (o el actual) y devuelve las stats de los jugadores.
+    """
+    # 1. Buscar en el historial de juegos del equipo
+    gamefinder = leaguegamefinder.LeagueGameFinder(team_id_nullable=team_id)
+    games = gamefinder.get_data_frames()[0]
+    
+    # Ordenar por fecha para asegurar el último
+    games = games.sort_values('GAME_DATE', ascending=False)
+    
+    if games.empty:
+        return None, "No hay datos recientes"
+        
+    # Tomamos el juego más reciente (fila 0)
+    last_game = games.iloc[0]
+    game_id = last_game['GAME_ID']
+    game_date = last_game['GAME_DATE']
+    matchup = last_game['MATCHUP']
+    wl = last_game['WL'] # W = Ganaron, L = Perdieron
+    
+    # 2. Obtener el Box Score (Detalle de jugadores) de ese juego
+    box = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+    players_stats = box.player_stats.get_data_frame()
+    
+    # 3. Filtrar solo los jugadores de NUESTRO equipo (porque el boxscore trae a los dos)
+    my_team_stats = players_stats[players_stats['TEAM_ID'] == team_id].copy()
+    
+    # 4. Limpiar y seleccionar columnas clave para tus hijos
+    # PLAYER_NAME, PTS, REB, AST, STL (Robos), BLK (Bloqueos)
+    display_df = my_team_stats[['PLAYER_NAME', 'PTS', 'REB', 'AST', 'STL', 'BLK', 'MIN']]
+    
+    # Convertir a números para que se vea bien
+    cols = ['PTS', 'REB', 'AST', 'STL', 'BLK']
+    display_df[cols] = display_df[cols].apply(pd.to_numeric, errors='coerce').fillna(0).astype(int)
+    
+    # Ordenar por Puntos (para ver a los líderes arriba)
+    display_df = display_df.sort_values(by='PTS', ascending=False).reset_index(drop=True)
+    
+    return display_df, f"{matchup} ({game_date}) - Resultado: {wl}"
+
 # --- PESTAÑAS ---
-tab1, tab2 = st.tabs(["📺 Marcador en Vivo", "⚖️ Duelo de Estrellas"])
+tab1, tab2 = st.tabs(["📊 Estadísticas Recientes (Comparativo)", "📺 Marcador en Vivo"])
 
-# --- PESTAÑA 1: JUEGO DEL DÍA ---
+# --- PESTAÑA 1: COMPARATIVO DE EQUIPOS (LO QUE PIDIÓ TU HIJO MAYOR) ---
 with tab1:
-    st.header("Pizarra de Juegos")
-    
-    try:
-        board = scoreboard.ScoreBoard()
-        games = board.games.get_dict()
-        
-        # IDs de los equipos clave
-        MY_TEAMS = [1610612738, 1610612744] # Celtics, Warriors
-        
-        found_game = False
-        
-        if not games:
-            st.info("😴 No hay juegos programados en la NBA para hoy.")
-        else:
-            for game in games:
-                home_id = game['homeTeam']['teamId']
-                away_id = game['awayTeam']['teamId']
-                
-                # Filtrar: Mostramos el juego SI es Celtics o Warriors. 
-                # (Si quieres ver TODOS los juegos, borra la linea del 'if')
-                if home_id in MY_TEAMS or away_id in MY_TEAMS:
-                    found_game = True
-                    
-                    # Datos
-                    h_team = game['homeTeam']
-                    a_team = game['awayTeam']
-                    status = game['gameStatusText']
-                    
-                    # URLs de Logos
-                    h_logo = f"https://cdn.nba.com/logos/nba/{home_id}/primary/L/logo.svg"
-                    a_logo = f"https://cdn.nba.com/logos/nba/{away_id}/primary/L/logo.svg"
-                    
-                    # --- DISEÑO DEL MARCADOR VISUAL ---
-                    with st.container():
-                        st.markdown("---")
-                        # 5 columnas: Logo L | Pts L | VS | Pts V | Logo V
-                        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
-                        
-                        with c1:
-                            st.image(h_logo, width=100)
-                            st.markdown(f"<h3 style='text-align: center;'>{h_team['teamTricode']}</h3>", unsafe_allow_html=True)
-                        
-                        with c2:
-                            st.metric("Local", h_team['score'])
-                            
-                        with c3:
-                            st.markdown(f"<div class='vs-text'>{status}</div>", unsafe_allow_html=True)
-                            
-                        with c4:
-                            st.metric("Visita", a_team['score'])
-                            
-                        with c5:
-                            st.image(a_logo, width=100)
-                            st.markdown(f"<h3 style='text-align: center;'>{a_team['teamTricode']}</h3>", unsafe_allow_html=True)
-                        st.markdown("---")
+    st.header("Rendimiento del Último Juego")
+    st.caption("Aquí mostramos el último partido que jugaron, sea hoy o hace días.")
 
-            if not found_game:
-                st.success("✅ Hoy hay descanso. Ni Celtics ni Warriors juegan hoy.")
-                st.caption("Revisa mañana para más acción.")
-                
-    except Exception as e:
-        st.error(f"Error conectando con la NBA: {e}")
+    col_bos, col_gsw = st.columns(2)
 
-# --- PESTAÑA 2: DUELO DE ESTRELLAS CON FOTOS ---
+    # --- COLUMNA CELTICS ---
+    with col_bos:
+        st.image(f"https://cdn.nba.com/logos/nba/{CELTICS_ID}/primary/L/logo.svg", width=80)
+        st.markdown("<div class='team-header' style='color: green;'>Boston Celtics</div>", unsafe_allow_html=True)
+        
+        with st.spinner("Cargando datos de Boston..."):
+            df_bos, context_bos = get_latest_game_stats(CELTICS_ID)
+            st.info(f"📅 {context_bos}")
+            if df_bos is not None:
+                # Mostramos la tabla pero ocultamos el índice feo de pandas
+                st.dataframe(df_bos, hide_index=True, use_container_width=True)
+
+    # --- COLUMNA WARRIORS ---
+    with col_gsw:
+        st.image(f"https://cdn.nba.com/logos/nba/{WARRIORS_ID}/primary/L/logo.svg", width=80)
+        st.markdown("<div class='team-header' style='color: #FFC72C;'>Golden State Warriors</div>", unsafe_allow_html=True)
+        
+        with st.spinner("Cargando datos de Golden State..."):
+            df_gsw, context_gsw = get_latest_game_stats(WARRIORS_ID)
+            st.info(f"📅 {context_gsw}")
+            if df_gsw is not None:
+                st.dataframe(df_gsw, hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.markdown("### 🏆 Líderes de Puntos")
+    # Pequeño insight rápido
+    if df_bos is not None and df_gsw is not None:
+        top_bos = df_bos.iloc[0]
+        top_gsw = df_gsw.iloc[0]
+        
+        c1, c2 = st.columns(2)
+        c1.metric(f"Mejor Celtic ({top_bos['PLAYER_NAME']})", f"{top_bos['PTS']} Pts")
+        c2.metric(f"Mejor Warrior ({top_gsw['PLAYER_NAME']})", f"{top_gsw['PTS']} Pts")
+
+# --- PESTAÑA 2: MARCADOR EN VIVO (SIMPLE) ---
 with tab2:
-    st.header("Comparador Visual")
+    # Reutilizamos la lógica simple para ver si hay juego HOY
+    st.header("¿Hay acción ahora mismo?")
+    board = scoreboard.ScoreBoard()
+    games = board.games.get_dict()
+    found = False
     
-    col_select_a, col_select_b = st.columns(2)
-    
-    celtics_roster = ["Jayson Tatum", "Jaylen Brown", "Jrue Holiday", "Derrick White", "Kristaps Porzingis"]
-    warriors_roster = ["Stephen Curry", "Draymond Green", "Andrew Wiggins", "Jonathan Kuminga", "Buddy Hield"]
-    
-    with col_select_a:
-        p1_name = st.selectbox("Jugador Celtics 🍀", celtics_roster, index=0)
-    with col_select_b:
-        p2_name = st.selectbox("Jugador Warriors 🌉", warriors_roster, index=0)
-
-    if st.button("⚔️ ¡Comparar!"):
-        # Función para obtener datos y FOTO
-        def get_player_data(name):
-            nba_players = players.get_players()
-            player_info = [p for p in nba_players if p['full_name'] == name][0]
-            p_id = player_info['id']
+    for game in games:
+        h_id = game['homeTeam']['teamId']
+        a_id = game['awayTeam']['teamId']
+        if h_id in [CELTICS_ID, WARRIORS_ID] or a_id in [CELTICS_ID, WARRIORS_ID]:
+            found = True
+            # Renderizado simple del juego
+            c1, c2, c3 = st.columns([1,0.5,1])
+            c1.metric(game['homeTeam']['teamTricode'], game['homeTeam']['score'])
+            c2.write(f"VS\n{game['gameStatusText']}")
+            c3.metric(game['awayTeam']['teamTricode'], game['awayTeam']['score'])
+            st.divider()
             
-            # Stats
-            career = playercareerstats.PlayerCareerStats(player_id=p_id)
-            df = career.get_data_frames()[0]
-            
-            # Foto URL
-            img_url = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{p_id}.png"
-            
-            return df, img_url
-
-        # Cargando...
-        with st.spinner('Analizando biométricos...'):
-            df1, img1 = get_player_data(p1_name)
-            df2, img2 = get_player_data(p2_name)
-            
-            # --- VISUALIZACIÓN CARA A CARA ---
-            col_p1, col_stats, col_p2 = st.columns([1, 2, 1])
-            
-            with col_p1:
-                st.image(img1, use_column_width=True)
-                st.markdown(f"<h3 style='text-align: center; color: green;'>{p1_name}</h3>", unsafe_allow_html=True)
-
-            with col_p2:
-                st.image(img2, use_column_width=True)
-                st.markdown(f"<h3 style='text-align: center; color: gold;'>{p2_name}</h3>", unsafe_allow_html=True)
-                
-            with col_stats:
-                st.markdown("### Stats de Carrera")
-                
-                # Puntos
-                diff = round(df1['PTS'].mean() - df2['PTS'].mean(), 1)
-                st.metric("Puntos por Juego (PPG)", f"{round(df1['PTS'].mean(), 1)} vs {round(df2['PTS'].mean(), 1)}", delta=diff)
-                
-                # Asistencias
-                diff_ast = round(df1['AST'].mean() - df2['AST'].mean(), 1)
-                st.metric("Asistencias (APG)", f"{round(df1['AST'].mean(), 1)} vs {round(df2['AST'].mean(), 1)}", delta=diff_ast)
-                
-                # Partidos Jugados
-                st.metric("Experiencia (Juegos)", f"{df1['GP'].count()} vs {df2['GP'].count()}")
+    if not found:
+        st.write("No hay juegos en vivo de tus equipos en este momento. Revisa la pestaña de Estadísticas Recientes.")
