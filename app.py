@@ -169,3 +169,7 @@ with tab2:
                 st.markdown("---")
         
         if not found:
+            st.write("No hay juegos activos de Celtics o Warriors en este momento.")
+            
+    except Exception as e:
+        st.error("Error cargando el marcador.")
